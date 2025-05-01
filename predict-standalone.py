@@ -1,17 +1,20 @@
+#!/usr/bin/env python
+#
 from skyfield.api import load, Topos
-from skyfield.almanac import dark_twilight_day, risings_and_settings
+from skyfield.almanac import dark_twilight_day, risings_and_settings, find_discrete
 from datetime import datetime, timedelta
 import pandas as pd
 
 # Configuration
-LAT, LON = 38.7083, -79.5308  # Spruce Knob, WV
-DAYS_AHEAD = 14
-MIN_MW_ALT_DEGREES = 15  # minimum altitude for Milky Way core
+LAT, LON = 38.7083, -79.5308  # Example: Spruce Knob, WV
+DAYS_AHEAD = 30
+MIN_MW_ALT_DEGREES = 15  # Minimum altitude for Milky Way core to be visible
 
 # Load ephemeris
 ts = load.timescale()
 eph = load('de421.bsp')
-obs = eph['earth'] + Topos(latitude_degrees=LAT, longitude_degrees=LON)
+observer = Topos(latitude_degrees=LAT, longitude_degrees=LON)
+obs = eph['earth'] + observer
 
 # Date range
 start_date = datetime.utcnow().date()
@@ -19,47 +22,65 @@ end_date = start_date + timedelta(days=DAYS_AHEAD)
 t0 = ts.utc(start_date.year, start_date.month, start_date.day)
 t1 = ts.utc(end_date.year, end_date.month, end_date.day)
 
-# Get darkness periods
-eph_f = dark_twilight_day(eph, Topos(latitude_degrees=LAT, longitude_degrees=LON))
-times, states = risings_and_settings(eph, eph['Moon'], Topos(latitude_degrees=LAT, longitude_degrees=LON))
-dark_times, dark_states = load('de421.bsp'), eph_f
+# Almanac functions
+dark_func = dark_twilight_day(eph, observer)
+moon_func = risings_and_settings(eph, eph['Moon'], observer)
 
-# Find darkness periods
-from skyfield.almanac import find_discrete
+# Evaluate events
+dark_times, dark_states = find_discrete(t0, t1, dark_func)
+moon_times, moon_events = find_discrete(t0, t1, moon_func)
 
-dark_times, dark_states = find_discrete(t0, t1, eph_f)
-moon_times, moon_events = find_discrete(t0, t1, risings_and_settings(eph, eph['Moon'], Topos(latitude_degrees=LAT, longitude_degrees=LON)))
-
-# Filter for periods when it's dark and the moon is down
+# Find overlaps between moon-down and astronomical darkness
 results = []
-for i in range(0, len(dark_states)-1):
+for i in range(0, len(dark_states) - 1):
+    print(f"dark_states[{i}]: {dark_states[i]}\n")
     if dark_states[i] == 2:  # Astronomical night
-        dark_start = dark_times[i]
-        dark_end = dark_times[i+1]
-        
-        for j in range(0, len(moon_events)-1, 2):
+        print("Astronomical night\n")
+        dark_start = dark_times[i].utc_datetime()
+        dark_end = dark_times[i + 1].utc_datetime()
+
+        print(f"dark_start: {dark_start}\n")
+        print(f"dark_end: {dark_end}\n")
+
+        for j in range(0, len(moon_events) - 1, 2):
             if moon_events[j] == 1:  # Moon set
-                moon_down_start = moon_times[j]
-                moon_down_end = moon_times[j+1]
-                
-                # Overlap of moon-down and astronomical night
-                start = max(dark_start.utc_datetime(), moon_down_start.utc_datetime())
-                end = min(dark_end.utc_datetime(), moon_down_end.utc_datetime())
-                
-                if start < end:
-                    # Check if MW core is visible
-                    check_time = ts.utc(start.year, start.month, start.day, start.hour, start.minute)
-                    mw = obs.at(check_time).observe(eph['galactic center']).apparent()
-                    alt, az, _ = mw.altaz()
-                    if alt.degrees > MIN_MW_ALT_DEGREES:
+                print("moon set\n")
+                moon_down_start = moon_times[j].utc_datetime()
+                moon_down_end = moon_times[j + 1].utc_datetime()
+
+                # Overlap
+                overlap_start = max(dark_start, moon_down_start)
+                overlap_end = min(dark_end, moon_down_end)
+
+                if overlap_start < overlap_end:
+                    check_time = ts.utc(overlap_start.year, overlap_start.month, overlap_start.day,
+                                        overlap_start.hour, overlap_start.minute)
+
+                    # Check Milky Way core elevation (~Sagittarius A*, Galactic center)
+                    galactic_ra_hours = 17 + (45 / 60)  # 17h45m
+                    galactic_dec_deg = -29.0
+                    from skyfield.positionlib import ICRF
+                    from skyfield.units import Angle
+                    galactic_center = eph['earth'].at(check_time).observe(ICRF(
+                        ra=Angle(hours=galactic_ra_hours),
+                        dec=Angle(degrees=galactic_dec_deg),
+                        distance=1.0  # Arbitrary nonzero
+                    )).apparent()
+
+                    alt, az, _ = galactic_center.altaz()
+
+                    if alt.degrees >= MIN_MW_ALT_DEGREES:
                         results.append({
-                            'Date': start.date(),
-                            'Start (UTC)': start.strftime('%H:%M'),
-                            'End (UTC)': end.strftime('%H:%M'),
-                            'MW Alt (°)': round(alt.degrees, 1)
+                            'Date': overlap_start.date(),
+                            'Start (UTC)': overlap_start.strftime('%H:%M'),
+                            'End (UTC)': overlap_end.strftime('%H:%M'),
+                            'MW Altitude (°)': round(alt.degrees, 1)
                         })
 
-# Display results
+# Output results
 df = pd.DataFrame(results)
 print("\nBest Milky Way Viewing Windows (Offline, No Weather):\n")
-print(df.to_string(index=False))
+if df.empty:
+    print("No suitable windows found in the next", DAYS_AHEAD, "days.")
+else:
+    print(df.to_string(index=False))
