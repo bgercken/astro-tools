@@ -38,6 +38,7 @@ import argparse
 import csv
 import os
 import re
+import shutil
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -839,6 +840,94 @@ def is_osc_file(path: Path) -> bool:
 
     return any(hint in search_text for hint in osc_hints)
 
+def safe_folder_name(name: str) -> str:
+    """
+    Make a Windows-safe folder name.
+    """
+    name = name.replace(":", "_")
+    name = name.replace("\\", "_")
+    name = name.replace("/", "_")
+    name = name.replace("*", "_")
+    name = name.replace("?", "_")
+    name = name.replace('"', "_")
+    name = name.replace("<", "_")
+    name = name.replace(">", "_")
+    name = name.replace("|", "_")
+    return name.strip()
+
+
+def copy_grouped_files_to_cache(
+    grouped: dict[str, TargetSummary],
+    cache_root: Path,
+    dry_run: bool = False,
+) -> None:
+    """
+    Copy matched files into a local cache organized as:
+
+        cache_root/
+          Target/
+            Date/
+              Filter/
+                filename.fit
+
+    Example:
+        D:/AstroCache/
+          NGC 2239/
+            2026-02-12/
+              H/
+              O/
+              S/
+    """
+
+    total_files = sum(len(summary.files) for summary in grouped.values())
+    copied = 0
+    skipped = 0
+
+    print()
+    print(f"Preparing to copy {total_files} file(s) to: {cache_root}")
+    print()
+
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    for target, summary in grouped.items():
+        target_folder = safe_folder_name(target)
+
+        for info in summary.files:
+            date_folder = safe_folder_name(info.image_date or "UnknownDate")
+            filter_folder = safe_folder_name(info.filter_name or "UnknownFilter")
+
+            dest_dir = cache_root / target_folder / date_folder / filter_folder
+            dest_path = dest_dir / info.path.name
+
+            if dry_run:
+                print(f"[DRY RUN] {info.path} -> {dest_path}")
+                continue
+
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            # Skip if same size already exists
+            if dest_path.exists():
+                try:
+                    if dest_path.stat().st_size == info.path.stat().st_size:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
+
+            try:
+                shutil.copy2(info.path, dest_path)
+                copied += 1
+            except Exception as exc:
+                print(f"ERROR copying: {info.path}")
+                print(f"  {exc}")
+
+    if dry_run:
+        print()
+        print("Dry run complete. No files were copied.")
+    else:
+        print()
+        print(f"Copy complete. Copied: {copied}, skipped existing: {skipped}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -870,6 +959,15 @@ def main() -> int:
         "--only-filter",
         help="Show only a specific filter (e.g. Ha, OIII, SII, L, R, G, B)"
     )
+    parser.add_argument(
+    "--copy-to",
+    help=r"Copy matched files to a local cache folder, e.g. D:\AstroCache"
+    )
+    parser.add_argument(
+    "--dry-run-copy",
+    action="store_true",
+    help="Show what would be copied without actually copying files"
+)
 
     args = parser.parse_args()
 
@@ -927,6 +1025,14 @@ def main() -> int:
         csv_path = Path(args.csv)
         write_csv(grouped, csv_path)
         print(f"CSV written to: {csv_path}")
+
+    if args.copy_to:
+        cache_root = Path(args.copy_to)
+        copy_grouped_files_to_cache(
+            grouped=grouped,
+            cache_root=cache_root,
+            dry_run=args.dry_run_copy,
+        )
 
     return 0
 
